@@ -2360,15 +2360,6 @@ fn delegation_basic_test() {
             delegate_to_2,
         ));
 
-        // let init_staker_state = MemorySnapshot::all(start_era, &contract_id, staker);
-        // let init_delegate_state = MemorySnapshot::all(start_era, &contract_id, delegate_to_2);
-
-        // println!("BEFORE: staker balance {:?}, delegated_to balance  {:?}, delegated_to_2 balance  {:?}",
-        //     <TestRuntime as Config>::Currency::free_balance(&staker),
-        //     <TestRuntime as Config>::Currency::free_balance(&delegate_to),
-        //     <TestRuntime as Config>::Currency::free_balance(&delegate_to_2),
-        // );
-
         let current_era = start_era + 1;
         advance_to_era(current_era);
 
