@@ -317,6 +317,8 @@ pub mod pallet {
         SelfDelegation,
         /// Self::delegation() did not yield a value
         DelegationNotFound,
+        /// RewardDistribution should be set to Delegate in order to delegate rewards 
+        RewardDistributionNotSetToDelegated,
     }
 
     #[pallet::hooks]
@@ -1028,6 +1030,12 @@ pub mod pallet {
         ) -> DispatchResultWithPostInfo {
             Self::ensure_pallet_enabled()?;
             let staker = ensure_signed(origin)?;
+            let ledger = Self::ledger(&staker);
+
+//            ensure!(!ledger.is_empty(), Error::<T>::NotActiveStaker);
+
+            ensure!(ledger.reward_destination == RewardDestination::Delegate, Error::<T>::RewardDistributionNotSetToDelegated);
+
             ensure!(staker != delegate, Error::<T>::SelfDelegation);
 
             ensure!(RegisteredDapps::<T>::get(&contract_id).is_some(), Error::<T>::NotOperatedContract);
@@ -1341,6 +1349,7 @@ pub mod pallet {
             dapp_state: DAppState,
             latest_staked_value: BalanceOf<T>,
         ) -> Option<T::AccountId> {
+            
             if reward_destination == RewardDestination::Delegate 
                 && dapp_state == DAppState::Registered
                 && latest_staked_value > Zero::zero() {
