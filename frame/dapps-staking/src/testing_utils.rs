@@ -499,6 +499,17 @@ pub(crate) fn assert_claim_staker(claimer: AccountId, contract_id: &MockSmartCon
     let init_state_claim_era = MemorySnapshot::all(claim_era, contract_id, claimer);
     let init_state_current_era = MemorySnapshot::all(current_era, contract_id, claimer);
 
+    let reward_to = DappsStaking::delegate_reward_to(
+        &claimer,
+        &contract_id,
+        init_state_current_era.ledger.reward_destination,
+        init_state_current_era.dapp_info.state,
+        init_state_current_era.staker_info.latest_staked_value(),
+    )
+    .unwrap_or(claimer.clone());
+
+    let init_delegated_current_era = MemorySnapshot::all(current_era, contract_id, reward_to);
+
     // Calculate contract portion of the reward
     let (_, stakers_joint_reward) = DappsStaking::dev_stakers_split(
         &init_state_claim_era.contract_info,
@@ -523,15 +534,27 @@ pub(crate) fn assert_claim_staker(claimer: AccountId, contract_id: &MockSmartCon
         contract_id.clone(),
     ));
 
-    let final_state_current_era = MemorySnapshot::all(current_era, contract_id, claimer);
+    let final_staker_state = MemorySnapshot::all(current_era, contract_id, claimer);
+    let final_delegated_state = MemorySnapshot::all(current_era, contract_id, reward_to);
 
     // assert staked and free balances depending on restake check,
-    assert_restake_reward(
-        &init_state_current_era,
-        &final_state_current_era,
-        calculated_reward,
-    );
-
+    // delegation case is NOT covered here, rather in assert_delegated_reward() function
+    if reward_to == claimer {
+        assert_restake_reward(
+            &init_state_current_era,
+            &final_staker_state,
+            calculated_reward,
+        );
+    } else {
+        assert_delegated_reward(
+            &init_state_current_era,
+            &init_delegated_current_era,
+            &final_staker_state, 
+            &final_delegated_state,   
+            calculated_reward,  
+        );
+    }
+    
     // check for stake event if restaking is performed
     if DappsStaking::should_restake_reward(
         init_state_current_era.ledger.reward_destination,
@@ -548,19 +571,20 @@ pub(crate) fn assert_claim_staker(claimer: AccountId, contract_id: &MockSmartCon
         );
     }
 
+
     // last event should be Reward, regardless of restaking
     System::assert_last_event(mock::RuntimeEvent::DappsStaking(Event::Reward(
-        claimer,
+        reward_to,
         contract_id.clone(),
         claim_era,
         calculated_reward,
     )));
 
-    let (new_era, _) = final_state_current_era.staker_info.clone().claim();
-    if final_state_current_era.staker_info.is_empty() {
+    let (new_era, _) = final_staker_state.staker_info.clone().claim();
+    if final_staker_state.staker_info.is_empty() {
         assert!(new_era.is_zero());
         assert!(!GeneralStakerInfo::<TestRuntime>::contains_key(
-            &claimer,
+            &reward_to,
             contract_id
         ));
     } else {
@@ -724,5 +748,36 @@ pub(crate) fn assert_burn_stale_reward(
     assert_eq!(
         issuance_before_claim - calculated_reward,
         issuance_after_claim
+    );
+}
+
+fn assert_delegated_reward(
+    init_staker_state: &MemorySnapshot,
+    init_delegate_state: &MemorySnapshot,
+    final_staker_state: &MemorySnapshot,
+    final_delegate_state: &MemorySnapshot,
+    reward: Balance,
+) {
+    // check that delegate has their reward
+    assert_eq!(
+        init_delegate_state.free_balance + reward, 
+        final_delegate_state.free_balance 
+    );
+    // staker balance should stay unchanged
+    assert_eq!(
+        init_staker_state.free_balance,
+        final_staker_state.free_balance
+    );
+    assert_eq!(
+        init_staker_state.era_info.staked,
+        final_staker_state.era_info.staked
+    );
+    assert_eq!(
+        init_staker_state.era_info.locked,
+        final_staker_state.era_info.locked
+    );
+    assert_eq!(
+        init_staker_state.contract_info,
+        final_staker_state.contract_info
     );
 }

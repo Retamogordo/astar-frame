@@ -1771,6 +1771,7 @@ fn claim_after_unregister_is_ok() {
 #[test]
 fn claim_only_payout_is_ok() {
     ExternalityBuilder::build().execute_with(|| {
+
         initialize_first_block();
 
         let developer = 1;
@@ -2316,5 +2317,195 @@ fn burn_stale_reward_negative_checks() {
             DappsStaking::burn_stale_reward(RuntimeOrigin::root(), contract_id, start_era,),
             Error::<TestRuntime>::AlreadyClaimedInThisEra
         );
+    })
+}
+
+#[test]
+fn delegation_basic_test() {
+    ExternalityBuilder::build().execute_with(|| {
+
+        initialize_first_block();
+
+        let developer = 1;
+        let staker = 2;
+        let delegate_to = 4;
+        let delegate_to_2 = 5;
+        let contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        // stake some tokens
+        let start_era = DappsStaking::current_era();
+        assert_register(developer, &contract_id);
+        let stake_value = 100;
+        assert_bond_and_stake(staker, &contract_id, stake_value);
+        assert_bond_and_stake(delegate_to, &contract_id, stake_value);
+
+        assert_set_reward_destination(staker, RewardDestination::Delegate);
+        assert_set_reward_destination(delegate_to, RewardDestination::Delegate);
+
+        assert_ok!(DappsStaking::set_delegate_reward_account(
+            RuntimeOrigin::signed(staker), 
+            contract_id,
+            delegate_to,
+        ));
+
+        System::assert_last_event(mock::RuntimeEvent::DappsStaking(Event::RewardDelegated(
+            staker,
+            contract_id,
+            delegate_to,
+        )));
+
+        assert_ok!(DappsStaking::set_delegate_reward_account(
+            RuntimeOrigin::signed(delegate_to), 
+            contract_id,
+            delegate_to_2,
+        ));
+
+        let current_era = start_era + 1;
+        advance_to_era(current_era);
+
+        assert_claim_staker(staker, &contract_id);
+
+        assert_claim_dapp(&contract_id, start_era);
+    })
+}
+
+#[test]
+fn delegation_chain_length_exceeded_max() {
+    ExternalityBuilder::build().execute_with(|| {
+
+        initialize_first_block();
+
+        let developer = 1;
+        let staker = 2;
+        let delegate_to = 4;
+        let delegate_to_2 = 5;
+        let delegate_to_3 = 6;
+        let contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        // stake some tokens
+        let start_era = DappsStaking::current_era();
+        assert_register(developer, &contract_id);
+        let stake_value = 100000;
+        assert_bond_and_stake(staker, &contract_id, stake_value);
+        assert_bond_and_stake(delegate_to, &contract_id, stake_value);
+        assert_bond_and_stake(delegate_to_2, &contract_id, stake_value);
+
+        assert_set_reward_destination(staker, RewardDestination::Delegate);
+        assert_set_reward_destination(delegate_to, RewardDestination::Delegate);
+        assert_set_reward_destination(delegate_to_2, RewardDestination::Delegate);
+
+        assert_ok!(DappsStaking::set_delegate_reward_account(
+            RuntimeOrigin::signed(staker), 
+            contract_id,
+            delegate_to,
+        ));
+
+        System::assert_last_event(mock::RuntimeEvent::DappsStaking(Event::RewardDelegated(
+            staker,
+            contract_id,
+            delegate_to,
+        )));
+
+        assert_ok!(DappsStaking::set_delegate_reward_account(
+            RuntimeOrigin::signed(delegate_to), 
+            contract_id,
+            delegate_to_2,
+        ));
+        assert_ok!(DappsStaking::set_delegate_reward_account(
+            RuntimeOrigin::signed(delegate_to_2), 
+            contract_id,
+            delegate_to_3,
+        ));
+
+        let current_era = start_era + 1;
+        advance_to_era(current_era);
+   
+        let balance_before_2 = Balances::free_balance(&delegate_to_2);
+        let balance_before_3 = Balances::free_balance(&delegate_to_3);
+        let current_era = start_era + 1;
+        advance_to_era(current_era);
+
+        assert_claim_staker(staker, &contract_id);
+
+        assert_claim_dapp(&contract_id, start_era);
+        let balance_after_2 = Balances::free_balance(&delegate_to_2);
+        let balance_after_3 = Balances::free_balance(&delegate_to_3);
+        // delegate_to_2 received its reward, this was checked in assert_claim_dapp
+        // basic recheck just to be sure that it was indeed delegate_to_2
+        assert!(balance_before_2 != balance_after_2);
+        // check that delegate_to_3 did not receive anything
+        assert_eq!(balance_before_3, balance_after_3);
+    })
+}
+
+#[test]
+fn delegation_remove() {
+    ExternalityBuilder::build().execute_with(|| {
+
+        initialize_first_block();
+
+        let developer = 1;
+        let staker = 2;
+        let delegate_to = 4;
+        let delegate_to_2 = 5;
+        let delegate_to_3 = 6;
+        let contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        // stake some tokens
+        let start_era = DappsStaking::current_era();
+        assert_register(developer, &contract_id);
+
+        let stake_value = 100;
+        assert_bond_and_stake(staker, &contract_id, stake_value);
+        assert_bond_and_stake(delegate_to, &contract_id, stake_value);
+        assert_bond_and_stake(delegate_to_2, &contract_id, stake_value);
+
+        assert_set_reward_destination(staker, RewardDestination::Delegate);
+        assert_set_reward_destination(delegate_to, RewardDestination::Delegate);
+        assert_set_reward_destination(delegate_to_2, RewardDestination::Delegate);
+
+        assert_ok!(DappsStaking::set_delegate_reward_account(
+            RuntimeOrigin::signed(staker), 
+            contract_id,
+            delegate_to,
+        ));
+
+        System::assert_last_event(mock::RuntimeEvent::DappsStaking(Event::RewardDelegated(
+            staker,
+            contract_id,
+            delegate_to,
+        )));
+
+        assert_ok!(DappsStaking::set_delegate_reward_account(
+            RuntimeOrigin::signed(delegate_to), 
+            contract_id,
+            delegate_to_2,
+        ));
+        assert_ok!(DappsStaking::set_delegate_reward_account(
+            RuntimeOrigin::signed(delegate_to_2), 
+            contract_id,
+            delegate_to_3,
+        ));
+        // from here on delegate_to is expected to receive the reward as delegate_to_2 was removed from the
+        // delegation chain
+        assert_ok!(DappsStaking::remove_reward_delegation(
+            RuntimeOrigin::signed(delegate_to), 
+            contract_id,
+        ));
+        System::assert_last_event(mock::RuntimeEvent::DappsStaking(Event::RewardDelegationRemoved(
+            delegate_to,
+            contract_id,
+        )));
+        
+        let balance_before = Balances::free_balance(&delegate_to_3);
+        let current_era = start_era + 1;
+        advance_to_era(current_era);
+
+        assert_claim_staker(staker, &contract_id);
+
+        assert_claim_dapp(&contract_id, start_era);
+        let balance_after = Balances::free_balance(&delegate_to_3);
+        // check that delegate_to_3 did not receive anything
+        assert_eq!(balance_before, balance_after);
     })
 }

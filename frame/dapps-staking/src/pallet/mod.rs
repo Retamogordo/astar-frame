@@ -33,6 +33,8 @@ const STAKING_ID: LockIdentifier = *b"dapstake";
 #[allow(clippy::module_inception)]
 pub mod pallet {
     use super::*;
+    /// Very rudimentary way to ensure the delegation chain is acyclic
+    pub const MAX_DELEGATION_CHAIN_DEPTH: u32 = 2;
 
     /// The balance type of this pallet.
     pub type BalanceOf<T> =
@@ -204,6 +206,20 @@ pub mod pallet {
     #[pallet::getter(fn storage_version)]
     pub(crate) type StorageVersion<T> = StorageValue<_, Version, ValueQuery>;
 
+    /// Reward delegation chain.
+    #[pallet::storage]
+    #[pallet::getter(fn delegation)]
+    pub type DelegationChain<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId, // rewarded staker account
+        Blake2_128Concat,
+        T::SmartContract,
+        T::AccountId, // account to delegate reward to
+        OptionQuery,
+    >;
+    
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(crate) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -240,6 +256,11 @@ pub mod pallet {
         ///
         /// \(developer account, smart contract, era, amount burned\)
         StaleRewardBurned(T::AccountId, T::SmartContract, EraIndex, BalanceOf<T>),
+
+        /// Delegate rewards "from" account "for" contract "to" delegate account
+        RewardDelegated(T::AccountId, T::SmartContract, T::AccountId),
+        /// Remove delegation link from rewards delegation chain for staker + contract_id
+        RewardDelegationRemoved(T::AccountId, T::SmartContract),
     }
 
     #[pallet::error]
@@ -292,6 +313,12 @@ pub mod pallet {
         NotActiveStaker,
         /// Transfering nomination to the same contract
         NominationTransferToSameContract,
+        /// Reward delegation to itself, FreeBalance could be used instead
+        SelfDelegation,
+        /// Self::delegation() did not yield a value
+        DelegationNotFound,
+        /// RewardDistribution should be set to Delegate in order to delegate rewards 
+        RewardDistributionNotSetToDelegated,
     }
 
     #[pallet::hooks]
@@ -776,7 +803,7 @@ pub mod pallet {
 
             if should_restake_reward {
                 ledger.locked = ledger.locked.saturating_add(staker_reward);
-                Self::update_ledger(&staker, ledger);
+                Self::update_ledger(&staker, ledger.clone());
 
                 // Update storage
                 GeneralEraInfo::<T>::mutate(&current_era, |value| {
@@ -798,10 +825,19 @@ pub mod pallet {
                     staker_reward,
                 ));
             }
+            // choose between delegated and staker account for reward
+            let reward_to = Self::delegate_reward_to(
+                &staker,
+                &contract_id,
+                ledger.reward_destination,
+                dapp_info.state,
+                staker_info.latest_staked_value(),
+            )
+            .unwrap_or(staker.clone());
 
-            T::Currency::resolve_creating(&staker, reward_imbalance);
+            T::Currency::resolve_creating(&reward_to, reward_imbalance);
             Self::update_staker_info(&staker, &contract_id, staker_info);
-            Self::deposit_event(Event::<T>::Reward(staker, contract_id, era, staker_reward));
+            Self::deposit_event(Event::<T>::Reward(reward_to, contract_id, era, staker_reward));
 
             Ok(Some(if should_restake_reward {
                 T::WeightInfo::claim_staker_with_restake()
@@ -980,6 +1016,55 @@ pub mod pallet {
                 contract_id.clone(),
                 era,
                 dapp_reward,
+            ));
+
+            Ok(().into())
+        }
+
+        #[pallet::call_index(14)]
+        #[pallet::weight(0)] // TODO manage weight here
+        pub fn set_delegate_reward_account(
+            origin: OriginFor<T>,
+            contract_id: T::SmartContract,
+            delegate: T::AccountId
+        ) -> DispatchResultWithPostInfo {
+            Self::ensure_pallet_enabled()?;
+            let staker = ensure_signed(origin)?;
+            let ledger = Self::ledger(&staker);
+
+            ensure!(ledger.reward_destination == RewardDestination::Delegate, Error::<T>::RewardDistributionNotSetToDelegated);
+
+            ensure!(staker != delegate, Error::<T>::SelfDelegation);
+
+            ensure!(RegisteredDapps::<T>::get(&contract_id).is_some(), Error::<T>::NotOperatedContract);
+
+            DelegationChain::<T>::insert(&staker, contract_id.clone(), delegate.clone());
+            
+            Self::deposit_event(Event::<T>::RewardDelegated(
+                staker,
+                contract_id,
+                delegate,
+            ));
+
+            Ok(().into())
+        }
+
+        #[pallet::call_index(15)]
+        #[pallet::weight(0)] // TODO manage weight here
+        pub fn remove_reward_delegation(
+            origin: OriginFor<T>,
+            contract_id: T::SmartContract,
+        ) -> DispatchResultWithPostInfo {
+            Self::ensure_pallet_enabled()?;
+            let staker = ensure_signed(origin)?;
+
+            ensure!(Self::delegation(&staker, &contract_id).is_some(), Error::<T>::DelegationNotFound);
+
+            DelegationChain::<T>::remove(&staker, &contract_id);
+            
+            Self::deposit_event(Event::<T>::RewardDelegationRemoved(
+                staker,
+                contract_id,
             ));
 
             Ok(().into())
@@ -1253,6 +1338,35 @@ pub mod pallet {
             reward_destination == RewardDestination::StakeBalance
                 && dapp_state == DAppState::Registered
                 && latest_staked_value > Zero::zero()
+        }
+
+        pub(crate) fn delegate_reward_to(
+            staker: &T::AccountId,
+            contract_id: &T::SmartContract,
+            reward_destination: RewardDestination,
+            dapp_state: DAppState,
+            latest_staked_value: BalanceOf<T>,
+        ) -> Option<T::AccountId> {
+
+            if reward_destination == RewardDestination::Delegate 
+                && dapp_state == DAppState::Registered
+                && latest_staked_value > Zero::zero() {
+
+                let mut i = 1;
+                let mut curr = Self::delegation(staker, contract_id.clone());
+                // this is a very rudimentary way to avoif falling into
+                // infinite loop whenever cyclic delegations are formed
+                // if MAX_DELEGATION_CHAIN_DEPTH is exceeded, the last delegated account is returned 
+                while i < MAX_DELEGATION_CHAIN_DEPTH && curr.is_some() {
+                    i += 1;
+                    let next = Self::delegation(curr.as_ref().unwrap(), contract_id.clone());
+                    if next.is_none() { 
+                        return curr; 
+                    }
+                    curr = next;
+                }
+                curr
+            } else { None }
         }
 
         /// Calculate reward split between developer and stakers.
